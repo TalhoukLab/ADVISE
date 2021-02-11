@@ -1,0 +1,5 @@
+channels:
+    - bioconda
+dependencies:
+    - strelka = 2.9.10
+    - manta = 1.5.0

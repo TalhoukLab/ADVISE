@@ -1,0 +1,6 @@
+channels:
+    - bioconda
+dependencies:
+    - variant-effect-predictor = 86-0
+    - vcf2maf = 1.6.16
+    - perl-bioperl = 1.7.2
