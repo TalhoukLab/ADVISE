@@ -14,22 +14,30 @@ capSpacePicard = "/mnt/thanos_lv/crushton/ADVISE/analysis_final/00-helperfiles/T
 sampleFile = workDir + "00-helperfiles/samplelist.hiseq.txt"  # Contains two columns: sample name and path
 ffpolish = "/home/crushton/Software/FFPolish/src/cli.py"
 
+# Input files for running SAGE
+sagePath = "/mnt/thanos_lv/crushton/ADVISE/analysis_final/00-helperfiles/sage-2.7.jar"
+hotspotVCF = "/mnt/thanos_lv/crushton/ADVISE/analysis_final/00-helperfiles/KnownHotspots.hg38.vcf.gz"
+highConfBED = "/mnt/thanos_lv/crushton/ADVISE/analysis_final/00-helperfiles/Targets.Validated.merge.bed3"
+
 # Config files
 mantaConfig = workDir + "00-helperfiles/configManta.py.ini"
 strelkaConfig = workDir + "00-helperfiles/configureStrelkaSomaticWorkflow.py.ini"
 dbSNPVCF = "/morinlab/reference/igenomes/Homo_sapiens/GSC/GRCh38/Annotation/Variation/dbsnp.all.151.chr.vcf.gz"
 strelka1Script = "/software/strelka-workflow/1.0.14/bin/configureStrelkaWorkflow.pl"
 strelka1Config = workDir + "00-helperfiles/ADVISE.strelka_config.ini"
-augmentMAF = "/mnt/thanos_lv/crushton/ADVISE/Analysis/SNVs/Strelka_Aggregated/00-HelperFiles/augment_maf_strelka.py"
+augmentMAFStrelka = "/mnt/thanos_lv/crushton/ADVISE/Analysis/SNVs/Strelka_Aggregated/00-HelperFiles/augment_maf_strelka.py"
+augmentMAF = "/mnt/thanos_lv/crushton/Software/lab_scripts/augment_maf/augment_maf.py"
+postFiltScript = "/mnt/thanos_lv/crushton/ADVISE/analysis_final/00-helperfiles/filter_maf.py"
 
 # VEP data paths
-vepCache = "/morinlab/reference/ensembl_vep_cache/"
+vepCache = "/home/crushton/.vep/"
 ncbiBuild = "GRCh38"
 
 # Load sample information
 allSamples = []
 tSamples = []
 nSamples = {}
+tBiopsySamples = {}
 
 # Output folders for each step of the analysis
 qualimapOut = workDir + "01-qualimap/"
@@ -51,6 +59,11 @@ mutect2MAFOut = workDir + "16-mutect2MAFs/"
 haplotypeMAFOut = workDir + "17-haplotypeMAFs/"
 ffpolishOut = workDir + "19-strelka2FFPolish/"
 ffpolishMAFOut = workDir + "20-strelka2FFPolishMAF/"
+sageOut = workDir + "22-sage/"
+sagePassedOut = workDir + "23-sagePassed/"
+sageMAFOut = workDir + "24-sageMAFs/"
+sageFiltOut = workDir + "25-sagePostFilt/"
+biopsyAugOut = workDir + "26-tumorsens/"
 
 with open(sampleFile) as f:
 	for line in f:
@@ -64,6 +77,13 @@ with open(sampleFile) as f:
 		nID = sID + "-N." + runID
 		nSamples[line] = nID
 
+		# Store the associated tumour tissue biopsy sample
+		# This only applies for patients which have a tumour
+		if "EN" in sID or "OV" in sID:
+			tBiopsyID = sID + "-T." + runID
+			tBiopsySamples[line] = tBiopsyID
+
+
 
 ### START PIPELINES ###
 
@@ -75,7 +95,9 @@ rule all:
 		expand(strelka2MAFOut + "{tSample}.strelka2.maf", tSample=tSamples),
 		expand(strelka1AugOut + "{tSample}.strelka1.augment.maf", tSample=tSamples),
 		expand(mutect2MAFOut + "{tSample}.mutect2.maf", tSample=tSamples),
-		expand(ffpolishMAFOut + "{tSample}.strelka2.ffpolish.maf", tSample=tSamples)
+#		expand(ffpolishMAFOut + "{tSample}.strelka2.ffpolish.maf", tSample=tSamples),
+		expand(sageFiltOut + "{tSample}.sage.filt.maf", tSample=tSamples),
+		expand(biopsyAugOut + "{tSample}.biopsyVar.maf", tSample=tBiopsySamples.keys())
 
 ### STEP 1: QC ###
 rule Qualimap:
@@ -249,6 +271,39 @@ rule Strelka1Run:
 	shell:
 		"make -C {strelka1Out}/{wildcards.tSamples} -j {threads} 2> {log.logFile} > {log.logFile}"
 
+# Run SAGE
+rule SageRun:
+	input:
+		tBAM = readGroupOut + "{tSamples}.withRG.bam",
+		nBAM = lambda wildcards: readGroupOut + nSamples[wildcards.tSamples] + ".withRG.bam"
+	output:
+		sageVcf = sageOut + "{tSamples}.sage.vcf"
+	params:
+		normName = lambda wildcards: nSamples[wildcards.tSamples]
+	message:
+		"Running SAGE on {wildcards.tSamples}"
+	threads:
+		1
+	log:
+		logFile = logDir + "{tSamples}.sage.log"
+	conda:
+		"envs/sage.yaml"
+	shell:
+		"java -jar {sagePath} -tumor_bam {input.tBAM} -tumor {wildcards.tSamples} -out {output.sageVcf} -ref_genome {refGenome} -hotspots {hotspotVCF} -panel_bed {highConfBED} -high_confidence_bed {highConfBED} -assembly hg38 -threads {threads} -reference_bam {input.nBAM} -validation_stringency SILENT -reference {params.normName} -max_read_depth 100000000 2> {log.logFile}"
+		
+rule SagePassed:
+	input:
+		sageVcf = sageOut + "{tSamples}.sage.vcf"
+	output:
+		sagePassed = sagePassedOut +  "{tSamples}.sage.passed.vcf"
+	message:
+		"Filtering SAGE calls for {wildcards.tSamples}"
+	conda:
+		"envs/samtools.yaml"
+	shell:
+		"egrep '^#|PASS' {input.sageVcf} | bedtools intersect -header -a - -b {highConfBED} | uniq > {output.sagePassed}"
+
+
 # Run Mutect2
 rule Mutect2Run:
 	input:
@@ -357,7 +412,7 @@ rule AugmentMAF:
 	log:
 		logFile = logDir + "{tSamples}.augmentmaf.log"
 	shell:
-		"python {augmentMAF} --replace -o {output.strelka1Aug} {input.strelka1MAF} {input.strelka1VCF} 2> {log.logFile} > {log.logFile}"
+		"python {augmentMAFStrelka} --replace -o {output.strelka1Aug} {input.strelka1MAF} {input.strelka1VCF} 2> {log.logFile} > {log.logFile}"
 
 rule vcf2MAFMutect2:
 	input:
@@ -391,6 +446,22 @@ rule vcf2MAFHaplotypeCaller:
 		"vcf2maf.pl --vep-path `dirname $(which variant_effect_predictor.pl)` --input-vcf {input.hapVCF} --output-maf {output.hapMAF} --vep-data {vepCache} --ref-fasta {refGenome} "
 		"--species homo_sapiens --ncbi-build {ncbiBuild} --normal-id {wildcards.allSamples} 2> {log.logFile} > {log.logFile}"
 
+rule vcf2MAFSage:
+	input:
+		sagePassed = sagePassedOut +  "{tSamples}.sage.passed.vcf" 
+	output:
+		sageMAF = sageMAFOut + "{tSamples}.sage.maf"
+	params:
+		normID = lambda wildcards: nSamples[wildcards.tSamples]
+	message:
+		"Running VCF2MAF on HaplotypeCaller calls for {wildcards.tSamples}"
+	log:
+		logFile = logDir + "{tSamples}.vcf2mafsage.log"
+	conda:
+		"envs/vcf2maf.yaml"
+	shell:
+		"vcf2maf.pl --vep-path `dirname $(which variant_effect_predictor.pl)` --input-vcf {input.sagePassed} --output-maf {output.sageMAF} --vep-data {vepCache} --ref-fasta {refGenome} "
+		"--species homo_sapiens --ncbi-build {ncbiBuild} --tumor-id {wildcards.tSamples} --normal-id {params.normID} 2> {log.logFile} > {log.logFile}"
 
 ### STEP 6: FILTER STRELKA2 CALLS ####
 rule FFPolish:
@@ -422,3 +493,45 @@ rule vcf2MAFFFPolish:
 	shell:
 		"vcf2maf.pl --vep-path `dirname $(which variant_effect_predictor.pl)` --input-vcf {input.strelka2ffpolish} --output-maf {output.ffpolishMAF} --vep-data {vepCache} --ref-fasta {refGenome} "
 		"--species homo_sapiens --ncbi-build {ncbiBuild} --tumor-id {wildcards.tSamples} --vcf-tumor-id TUMOR --normal-id {params.normID} --vcf-normal-id NORMAL 2> {log.logFile} > {log.logFile}"
+
+
+### STEP 7: FILTER SAGE CALLS  ###
+rule filterSAGE:
+	input:
+		tBAM = sampleDir + "{tSamples}.bam",
+		sageMAF = sageMAFOut + "{tSamples}.sage.maf"
+	output:
+		sageFilt = sageFiltOut + "{tSamples}.sage.filt.maf"
+	message:
+		" Post-filtering SAGE calls for {wildcards.tSamples}"
+	log:
+		logFile = logDir + "{tSamples}.sage.filt.log"
+	shell:
+		"python {postFiltScript} -r {refGenome} -f {log.logFile} -b {input.tBAM} -m {input.sageMAF} -o {output.sageFilt} --disable_vaf_filter "
+
+
+
+### LAST STEP ###
+# Calculate theoretical sensitivity of tumour biopsy mutations
+# i.e. are there any reads at all supporting these variants in the various liquid biopsies
+
+rule augmentMAFTumor:
+	input:
+		tBAM = sampleDir + "{tSamples}.bam",
+		nBAM = lambda wildcards: sampleDir + nSamples[wildcards.tSamples] + ".bam",
+		strelka1Aug = lambda wildcards: strelka1AugOut + tBiopsySamples[wildcards.tSamples] + ".strelka1.augment.maf"
+	output:
+		biopsyAugMaf = biopsyAugOut + "{tSamples}.biopsyVar.maf"
+	params:
+		sampleName = "{tSamples}",
+		tumorName = lambda wildcards: tBiopsySamples[wildcards.tSamples]
+	message:
+		"Running Augment MAF using the tumour MAF on {wildcards.tSamples}"
+	log:
+		logFile = logDir + "{tSamples}.augmentMAFBiopsy.log"
+	conda:
+		"envs/augmentmaf.yaml"
+	shell:
+		"python {augmentMAF} -r --normal-bam {input.nBAM} --tumour-bam {input.tBAM} --maf {input.strelka1Aug} --ignore_overlap {refGenome} {output.biopsyAugMaf} > {log.logFile} 2> {log.logFile};"
+		"sed -i 's/{params.tumorName}/{params.sampleName}/' {output.biopsyAugMaf}"
+		
